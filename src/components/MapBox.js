@@ -5,24 +5,58 @@ import '../styles/MapBox.css';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { useMapContext } from '../contexts/MapContext';
 import Api from '../services/Api'; 
-import Popup from './Popup';
+import MarkerPopup from './MarkerPopup';
+import {createMarkerDTO, createMarkerDatabaseObject, createMarkerDTOFromDatabaseRow} from '../Utils/MarkerDTO'; 
+import * as ReactDOMClient from 'react-dom/client';
 
 mapboxgl.accessToken = 'pk.eyJ1IjoiendlbGRvbjQ1IiwiYSI6ImNsbHNzejE3aTBsbWUzZXFmNmdqcjg1bWUifQ.u5djRrC9i8BRIv-pkaURog';
 
 function createMarkerDetails(coordinates) {
-  return {
-    name: prompt('Enter the name of the marker:'),
-    date: new Date().toLocaleDateString(),
-    coordinates_lng: coordinates.lng,
-    coordinates_lat: coordinates.lat
-  };
+  const name = prompt('Enter the name of the marker:');
+  const date = new Date().toLocaleDateString();
+  return createMarkerDTO(name, date, coordinates.lat, coordinates.lng);
 }
 
-function placeMarker(marker, map){
-  new mapboxgl.Marker()
-  .setLngLat([marker.coordinates_lng, marker.coordinates_lat])
-  .setPopup(new mapboxgl.Popup().setHTML(renderToString(<Popup name={marker.name} date={marker.date} />)))
-  .addTo(map.current);
+function useMarkers() {
+  const [markers, setMarkers] = useState({});
+
+  async function handleDeleteMarker(id) {
+    const markerToDelete = markers[id];
+
+    if (!markerToDelete) {
+      throw new Error(`Marker with id ${id} not found`);
+    }
+
+    markerToDelete.remove();
+
+    try {
+      const response = await Api.deleteMarker(id);
+
+      if (response.message === 'Marker deleted successfully') {
+        setMarkers(prevMarkers => {
+          const { [id]: removedMarker, ...rest } = prevMarkers;
+          return rest;
+        });
+      } else {
+        throw new Error('Failed to delete marker on the server');
+      }
+    } catch (error) {
+      console.error(error.message);
+    }
+  }
+
+  function placeMarker(marker, map) {
+    const placeholder = document.createElement('div');
+    const root = ReactDOMClient.createRoot(placeholder);
+    root.render(<MarkerPopup id={marker.id} name={marker.name} date={marker.date} onDeleteMarker={handleDeleteMarker} />);
+    const newMarker = new mapboxgl.Marker()
+      .setLngLat([marker.coordinates_lng, marker.coordinates_lat])
+      .setPopup(new mapboxgl.Popup().setDOMContent(placeholder))
+    newMarker.addTo(map.current);
+    setMarkers(prevMarkers => ({ ...prevMarkers, [marker.id]: newMarker }));
+  }
+
+  return { markers, placeMarker, handleDeleteMarker };
 }
 
 function MapBox() {
@@ -31,7 +65,24 @@ function MapBox() {
   const [lng, setLng] = useState(-70.9);
   const [lat, setLat] = useState(42.35);
   const [zoom, setZoom] = useState(9);
+  const { markers, placeMarker, handleDeleteMarker } = useMarkers();
   const { clickListenerActive, setClickListenerActive } = useMapContext();
+
+  const  handleMapClick = (event) => {
+    const markerDetails = createMarkerDetails(event.lngLat);
+  
+    Api.addMarker(markerDetails)
+      .then(data => {
+        // If the marker was added successfully on the server, create a new map marker
+        if (data) {
+          const marker = createMarkerDTOFromDatabaseRow(data);
+          placeMarker(marker, map);
+          map.current.off('click', handleMapClick);
+        } else {
+          console.error('Failed to add marker on the server');
+        }
+      });
+  };
 
   useEffect(() => {
     if (!map.current) {    
@@ -53,7 +104,8 @@ function MapBox() {
     Api.getAllMarkers()
     .then(data => {
       console.log('All markers:', data);
-      data.forEach(marker => {
+      data.forEach(data => {
+        const marker = createMarkerDTOFromDatabaseRow(data);
         placeMarker(marker, map);
       });
     })
@@ -61,21 +113,6 @@ function MapBox() {
       console.error('Error fetching markers:', error);
     });
   }, [clickListenerActive]);
-
-  const handleMapClick = (event) => {
-    const markerDetails = createMarkerDetails(event.lngLat);
-  
-    Api.addMarker(markerDetails)
-      .then(data => {
-        // If the marker was added successfully on the server, create a new map marker
-        if (data) {
-          placeMarker(data, map);
-          map.current.off('click', handleMapClick);
-        } else {
-          console.error('Failed to add marker on the server');
-        }
-      });
-  };
 
   return (
     <div ref={mapContainer} className="map-container" />
